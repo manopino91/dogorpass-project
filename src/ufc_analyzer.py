@@ -8,6 +8,7 @@ import time
 from typing import List, Dict, Optional
 import json
 import pandas as pd
+import re
 
 # Load environment variables from .env file
 load_dotenv('../config/keys.env')
@@ -33,24 +34,60 @@ class UFCPodcastAnalyzer:
         self.playlist_id = playlist_id
 
         # Connect to the SQLite database
-        self.connection = sqlite3.connect('ufc_analysis.db')
-        self.cursor = self.connection.cursor()
+        try:
+            self.connection = sqlite3.connect('ufc_analysis.db')
+            self.cursor = self.connection.cursor()
+            self._initialize_database()
+        except sqlite3.Error as e:
+            print(f"Database connection error: {str(e)}")
+            raise
+
+    def _initialize_database(self):
+        """Initialize the database with required tables."""
+        try:
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS podcast_analysis (
+                    video_id TEXT PRIMARY KEY,
+                    event_name TEXT,
+                    fighters TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self.connection.commit()
+        except sqlite3.Error as e:
+            print(f"Error initializing database: {str(e)}")
+            raise
 
     def get_playlist_videos(self) -> List[Dict]:
         """Fetch all videos from the playlist."""
         videos = []
-        request = self.youtube.playlistItems().list(
-            part='snippet',
-            playlistId=self.playlist_id,
-            maxResults=50  # You can adjust the number as needed
-        )
+        try:
+            request = self.youtube.playlistItems().list(
+                part='snippet',
+                playlistId=self.playlist_id,
+                maxResults=50
+            )
 
-        while request is not None:
-            response = request.execute()
-            videos += response['items']
-            request = self.youtube.playlistItems().list_next(request, response)
+            while request is not None:
+                response = request.execute()
+                videos += response['items']
+                request = self.youtube.playlistItems().list_next(request, response)
+        except Exception as e:
+            print(f"Error fetching playlist videos: {str(e)}")
+            return []
 
         return videos
+
+    def get_video_title(self, video_id: str) -> str:
+        """Retrieve the title of a video by its ID."""
+        try:
+            request = self.youtube.videos().list(part="snippet", id=video_id)
+            response = request.execute()
+            title = response["items"][0]["snippet"]["title"] if response["items"] else "Unknown Title"
+            return title
+        except Exception as e:
+            print(f"Error fetching video title: {str(e)}")
+            return "Error Fetching Title"
 
     def get_transcript(self, video_id: str) -> Optional[str]:
         """Get the full transcript for a video."""
@@ -66,40 +103,65 @@ class UFCPodcastAnalyzer:
         """Format the list of fighters into the desired columnar structure."""
         fighters_dict = {}
         for index, fighter in enumerate(fighter_list, start=1):
-            fighters_dict[f"fighter_{index}"] = fighter
+            fighters_dict[f"fighter_{index}"] = fighter.strip()
         return fighters_dict
 
-    def analyze_transcript(self, transcript: str) -> Dict:
+    def analyze_transcript(self, transcript: str, video_title: str) -> Dict:
         """Analyze transcript using Gemini AI to extract fighter picks and event info."""
-        prompt = """
-        Analyze this UFC podcast transcript and extract the following information:
-        1. Which fighters were picked to win the UFC event by the guy that is being interview and asked opinions.
-        2. At the end of the podcast there is a PRP section where they repeat all the winners, you can double check the results there as well.
+        prompt = f"""
+        Analyze this UFC podcast transcript titled '{video_title}' and extract the following information:
+        1. Extract ONLY the fighters that Cody picked as WINNERS for each fight on the UFC card. Do not include both fighters from a matchup.
+        2. Important rules for extraction:
+              - For each fight matchup, only include the predicted WINNER
+              - If Cody is unsure or doesn't make a clear pick, skip that fight completely
+              - Do not list both fighters from the same matchup
+              - Double-check the picks against the PRP (Picks Recap Portion) section at the end if available
         3. What was the UFC event name mentioned?
 
         Format your response as JSON with the following structure:
-        {
-            "fighters": {
+        {{
+            "fighters": {{
                 "fighter_1": "Fighter1",
                 "fighter_2": "Fighter2",
                 "fighter_3": "Fighter3",
                 "fighter_4": "Fighter4",
                 ...
-            },
+            }},
             "event_name": "UFC XXX"
-        }
-        If you can't find this information, return null values.
+        }}
+        Notes:
+              - Use null if you can't find the event name
+              - Only include clear, definitive picks
+              - The "winners" object should never contain both fighters from the same matchup
+              - If uncertain about any pick, exclude it completely
         """
         try:
             response = self.model.generate_content(transcript + "\n" + prompt)
-            print("Response from Gemini AI:")
-            print(response.text)
 
             if response.text.strip() == "":
                 print("Empty response received.")
                 return {"fighters": {}, "event_name": None}
 
-            analysis_result = json.loads(response.text)
+            # Clean up the response text to ensure valid JSON
+            cleaned_response = response.text.replace("```json", "").replace("```", "").strip()
+
+            try:
+                # First attempt to parse the JSON directly
+                analysis_result = json.loads(cleaned_response)
+            except json.JSONDecodeError as e:
+                print(f"Initial JSON parsing failed: {str(e)}")
+                # If that fails, try to extract just the JSON object
+                json_pattern = r'\{[\s\S]*\}'
+                match = re.search(json_pattern, cleaned_response)
+                if match:
+                    try:
+                        analysis_result = json.loads(match.group())
+                    except json.JSONDecodeError:
+                        print("Failed to parse extracted JSON pattern")
+                        return {"fighters": {}, "event_name": None}
+                else:
+                    print("No valid JSON pattern found in response")
+                    return {"fighters": {}, "event_name": None}
 
             # Handle case where fighter_picks might be in the response instead of fighters
             if "fighter_picks" in analysis_result and analysis_result["fighter_picks"]:
@@ -108,55 +170,77 @@ class UFCPodcastAnalyzer:
             elif "fighters" not in analysis_result:
                 analysis_result["fighters"] = {}
 
+            # Print the analysis result once
+            print("Analysis Result:")
+            print(json.dumps(analysis_result, indent=2))
+
             return analysis_result
 
-        except json.JSONDecodeError:
-            print("Error decoding JSON.")
-            return {"fighters": {}, "event_name": None}
         except Exception as e:
-            print(f"Error calling Gemini AI: {str(e)}")
+            print(f"Error processing response: {str(e)}")
             return {"fighters": {}, "event_name": None}
 
     def save_to_database(self, analysis_result: Dict, video_id: str):
         """Insert analysis results into the database."""
-        if analysis_result["event_name"]:
-            fighters_data = ', '.join([f"{k}: {v}" for k, v in analysis_result["fighters"].items()])
-            self.cursor.execute("""
-                INSERT INTO podcast_analysis (video_id, event_name, fighters)
-                VALUES (?, ?, ?)
-            """, (video_id, analysis_result["event_name"], fighters_data))
-            self.connection.commit()
+        try:
+            if analysis_result["event_name"]:
+                fighters_data = ', '.join([f"{k}: {v}" for k, v in analysis_result["fighters"].items()])
+                self.cursor.execute("""
+                    INSERT OR REPLACE INTO podcast_analysis (video_id, event_name, fighters)
+                    VALUES (?, ?, ?)
+                """, (video_id, analysis_result["event_name"], fighters_data))
+                self.connection.commit()
+                print("Successfully saved to database")
+        except sqlite3.Error as e:
+            print(f"Database error: {str(e)}")
+        except Exception as e:
+            print(f"Error saving to database: {str(e)}")
 
     def save_results(self, results: List[Dict], filename: str = "podcast_analysis.csv"):
         """Save analysis results to a CSV file."""
-        expanded_results = []
-        for result in results:
-            event_data = {"event_name": result["event_name"]}
-            event_data.update(result["fighters"])
-            expanded_results.append(event_data)
+        try:
+            expanded_results = []
+            for result in results:
+                event_data = {"event_name": result["event_name"]}
+                event_data.update(result["fighters"])
+                expanded_results.append(event_data)
 
-        df = pd.DataFrame(expanded_results)
-        df.to_csv(filename, index=False)
+            df = pd.DataFrame(expanded_results)
+            df.to_csv(filename, index=False)
+            print(f"Results successfully saved to {filename}")
+        except Exception as e:
+            print(f"Error saving results to CSV: {str(e)}")
 
     def run_analysis(self):
         """Main analysis pipeline."""
         videos = self.get_playlist_videos()
+        if not videos:
+            print("No videos found in playlist.")
+            return
+
         analysis_results = []
 
         for video in videos:
-            video_id = video['snippet']['resourceId']['videoId']
-            transcript = self.get_transcript(video_id)
+            try:
+                video_id = video['snippet']['resourceId']['videoId']
+                video_title = self.get_video_title(video_id)
+                print(f"\nProcessing video: {video_title}")
 
-            if transcript:
-                proceed = input(f"\nProceed with analyzing the transcript for video ID {video_id}? (y/n): ")
+                transcript = self.get_transcript(video_id)
+                if not transcript:
+                    print("No transcript available, skipping...")
+                    continue
+
+                proceed = input(f"\nProceed with analyzing the transcript for video '{video_title}'? (y/n): ")
                 if proceed.lower() != 'y':
                     print("Skipping this video.")
                     continue
 
-                while True:
-                    analysis_result = self.analyze_transcript(transcript)
-                    print("AI Result:")
-                    print(analysis_result)
+                retry_count = 0
+                max_retries = 3
+
+                while retry_count < max_retries:
+                    analysis_result = self.analyze_transcript(transcript, video_title)
 
                     like_result = input("Do you like this result? (y/n): ")
                     if like_result.lower() == 'y':
@@ -164,34 +248,21 @@ class UFCPodcastAnalyzer:
                         analysis_results.append(analysis_result)
                         break
                     else:
-                        print("Rerunning the analysis...")
-                        continue
+                        retry_count += 1
+                        if retry_count == max_retries:
+                            print(f"Reached maximum retries for video: {video_title}")
+                            break
+                        else:
+                            print(f"Retrying... Attempt {retry_count}")
 
-                time.sleep(2)
+            except KeyError as e:
+                print(f"Error processing video: {str(e)}")
+            except Exception as e:
+                print(f"Unexpected error: {str(e)}")
 
         self.save_results(analysis_results)
-        print("\nAll analyses are complete.")
-
-    def __del__(self):
-        """Close the database connection when the instance is deleted."""
-        self.connection.close()
-
-
-def main():
-    # Load environment variables from .env file
-    load_dotenv('../config/keys.env')
-
-    # Initialize analyzer
-    analyzer = UFCPodcastAnalyzer(
-        youtube_api_key=os.getenv('API_KEY'),
-        gemini_api_key=os.getenv('GEMINI_API_KEY'),
-        playlist_id=os.getenv('PLAYLIST_ID')
-    )
-
-    # Run analysis
-    analyzer.run_analysis()
-
+        print("Analysis completed.")
 
 if __name__ == "__main__":
-    main()
-
+    analyzer = UFCPodcastAnalyzer(API_KEY, GEMINI_API_KEY, PLAYLIST_ID)
+    analyzer.run_analysis()

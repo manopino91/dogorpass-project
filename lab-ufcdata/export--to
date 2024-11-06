@@ -1,0 +1,17 @@
+import pandas as pd
+import sqlite3
+
+# Connect to the SQLite database
+conn = sqlite3.connect('/home/manopino91/dogorpass-project/src/ufc_analysis.db')  # Replace 'your_database.db' with your actual database file
+
+# Query the database and load the data into a pandas DataFrame
+query = "SELECT * FROM podcast_analysis"  # Replace 'your_table_name' with the name of your table
+df = pd.read_sql_query(query, conn)
+
+# Export the DataFrame to a CSV file
+df.to_csv('output.csv', index=False)  # Replace 'dogorpass-picks.csv' with your desired CSV file name
+
+# Close the database connection
+conn.close()
+
+print("Data has been exported to output.csv")
