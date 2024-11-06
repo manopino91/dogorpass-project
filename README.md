@@ -45,5 +45,8 @@ For security reasons, API keys and sensitive information are not included in thi
    GEMINI_API_KEY=your_gemini_api_key
    PLAYLIST_ID=your_youtube_playlist_id
 
+## Step 3: Run the python script
+
+python main_script.py
 
 
