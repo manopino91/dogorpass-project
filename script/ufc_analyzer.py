@@ -1,6 +1,5 @@
 import os
 import sqlite3
-from pathlib import Path
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -11,18 +10,13 @@ import json
 import pandas as pd
 import re
 
-class Config:
-    """Secure configuration container"""
-    def __init__(self, env_path: str):
-        load_dotenv(env_path)
-        self.youtube_api_key = os.getenv('API_KEY')
-        self.gemini_api_key = os.getenv('GEMINI_API_KEY')
-        self.playlist_id = os.getenv('PLAYLIST_ID')
-        
-        # Validate required variables
-        if not all([self.youtube_api_key, self.gemini_api_key, self.playlist_id]):
-            raise ValueError("Missing required environment variables.") 
-        
+# Load environment variables from .env file
+load_dotenv('../config/keys.env')
+
+API_KEY = os.getenv('API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+PLAYLIST_ID = os.getenv('PLAYLIST_ID')  # Load Playlist ID from the .env file
+
 class UFCPodcastAnalyzer:
     def __init__(self, youtube_api_key: str, gemini_api_key: str, playlist_id: str):
         """Initialize the analyzer with necessary API keys."""
@@ -105,12 +99,9 @@ class UFCPodcastAnalyzer:
             print(f"Error fetching transcript for video {video_id}: {str(e)}")
             return None
 
-    def format_fighters(self, fighter_list: List[str]) -> Dict:
-        """Format the list of fighters into the desired columnar structure."""
-        fighters_dict = {}
-        for index, fighter in enumerate(fighter_list, start=1):
-            fighters_dict[f"fighter_{index}"] = fighter.strip()
-        return fighters_dict
+    def format_fighters(self, fighter_list: List[str]) -> List[str]:
+        """Format the list of fighters into the desired list structure."""
+        return [fighter.strip() for fighter in fighter_list]
 
     def analyze_transcript(self, transcript: str, video_title: str) -> Dict:
         """Analyze transcript using Gemini AI to extract fighter picks and event info."""
@@ -126,27 +117,19 @@ class UFCPodcastAnalyzer:
 
         Format your response as JSON with the following structure:
         {{
-            "fighters": {{
-                "fighter_1": "Fighter1",
-                "fighter_2": "Fighter2",
-                "fighter_3": "Fighter3",
-                "fighter_4": "Fighter4",
-                ...
-            }},
+            "fighters": ["Fighter1", "Fighter2"],
             "event_name": "UFC XXX"
         }}
         Notes:
               - Use null if you can't find the event name
               - Only include clear, definitive picks
-              - The "winners" object should never contain both fighters from the same matchup
-              - If uncertain about any pick, exclude it completely
         """
         try:
             response = self.model.generate_content(transcript + "\n" + prompt)
-            
+
             if response.text.strip() == "":
                 print("Empty response received.")
-                return {"fighters": {}, "event_name": None}
+                return {"fighters": [], "event_name": None}
 
             # Clean up the response text to ensure valid JSON
             cleaned_response = response.text.replace("```json", "").replace("```", "").strip()
@@ -164,17 +147,17 @@ class UFCPodcastAnalyzer:
                         analysis_result = json.loads(match.group())
                     except json.JSONDecodeError:
                         print("Failed to parse extracted JSON pattern")
-                        return {"fighters": {}, "event_name": None}
+                        return {"fighters": [], "event_name": None}
                 else:
                     print("No valid JSON pattern found in response")
-                    return {"fighters": {}, "event_name": None}
+                    return {"fighters": [], "event_name": None}
 
             # Handle case where fighter_picks might be in the response instead of fighters
             if "fighter_picks" in analysis_result and analysis_result["fighter_picks"]:
                 formatted_fighters = self.format_fighters(analysis_result["fighter_picks"])
                 analysis_result["fighters"] = formatted_fighters
             elif "fighters" not in analysis_result:
-                analysis_result["fighters"] = {}
+                analysis_result["fighters"] = []
 
             # Print the analysis result once
             print("Analysis Result:")
@@ -184,13 +167,13 @@ class UFCPodcastAnalyzer:
 
         except Exception as e:
             print(f"Error processing response: {str(e)}")
-            return {"fighters": {}, "event_name": None}
+            return {"fighters": [], "event_name": None}
 
     def save_to_database(self, analysis_result: Dict, video_id: str):
         """Insert analysis results into the database."""
         try:
             if analysis_result["event_name"]:
-                fighters_data = ', '.join([f"{k}: {v}" for k, v in analysis_result["fighters"].items()])
+                fighters_data = ', '.join(analysis_result["fighters"])  # Store as comma-separated values
                 self.cursor.execute("""
                     INSERT OR REPLACE INTO podcast_analysis (video_id, event_name, fighters)
                     VALUES (?, ?, ?)
@@ -208,7 +191,7 @@ class UFCPodcastAnalyzer:
             expanded_results = []
             for result in results:
                 event_data = {"event_name": result["event_name"]}
-                event_data.update(result["fighters"])
+                event_data["fighters"] = ", ".join(result["fighters"])  # Join list of fighters
                 expanded_results.append(event_data)
 
             df = pd.DataFrame(expanded_results)
@@ -239,66 +222,20 @@ class UFCPodcastAnalyzer:
 
                 proceed = input(f"\nProceed with analyzing the transcript for video '{video_title}'? (y/n): ")
                 if proceed.lower() != 'y':
-                    print("Skipping this video.")
                     continue
 
-                retry_count = 0
-                max_retries = 3
+                analysis_result = self.analyze_transcript(transcript, video_title)
+                self.save_to_database(analysis_result, video_id)
 
-                while retry_count < max_retries:
-                    analysis_result = self.analyze_transcript(transcript, video_title)
-                    
-                    like_result = input("Do you like this result? (y/n): ")
-                    if like_result.lower() == 'y':
-                        self.save_to_database(analysis_result, video_id)
-                        analysis_results.append(analysis_result)
-                        break
-                    else:
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            print(f"Rerunning the analysis... (Attempt {retry_count + 1}/{max_retries})")
-                        else:
-                            print("Maximum retry attempts reached. Moving to next video...")
+                analysis_results.append(analysis_result)
 
-                time.sleep(2)  # Rate limiting
+                time.sleep(2)  # Wait before processing the next video
 
             except Exception as e:
                 print(f"Error processing video {video_id}: {str(e)}")
-                continue
 
-        if analysis_results:
-            self.save_results(analysis_results)
-            print("\nAll analyses are complete.")
-        else:
-            print("\nNo successful analyses to save.")
-
-    def __del__(self):
-        """Close the database connection when the instance is deleted."""
-        try:
-            if hasattr(self, 'connection'):
-                self.connection.close()
-        except Exception as e:
-            print(f"Error closing database connection: {str(e)}")
-
-
-
-def main():
-    try:
-        # Load environment variables using Config class
-        config = Config('../config/keys.env')
-
-        # Initialize analyzer with values from Config
-        analyzer = UFCPodcastAnalyzer(
-            youtube_api_key=config.youtube_api_key,
-            gemini_api_key=config.gemini_api_key,
-            playlist_id=config.playlist_id
-        )
-
-        # Run analysis
-        analyzer.run_analysis()
-
-    except Exception as e:
-        print(f"Fatal error: {str(e)}")
+        self.save_results(analysis_results)
 
 if __name__ == "__main__":
-    main()
+    analyzer = UFCPodcastAnalyzer(API_KEY, GEMINI_API_KEY, PLAYLIST_ID)
+    analyzer.run_analysis()
