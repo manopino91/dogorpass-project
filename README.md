@@ -34,3 +34,16 @@ To get started, clone the repository to your local machine:
 git clone https://github.com/yourusername/ufc-podcast-analyzer.git
 cd ufc-podcast-analyzer
 
+## Step 2: Set Up Environment Variables
+
+For security reasons, API keys and sensitive information are not included in this repository. To configure the keys, follow these steps:
+
+1. Create a `.env` file in the `conf` directory with the following variables:
+
+   ```env
+   YOUTUBE_API_KEY=your_youtube_api_key
+   GEMINI_API_KEY=your_gemini_api_key
+   PLAYLIST_ID=your_youtube_playlist_id
+
+
+
