@@ -1,4 +1,4 @@
-UFC Podcast Analyzer
+UFC PODCAST ANALYZER
 
 This project is a specialized Python script designed to analyze UFC podcasts, specifically targeting the Dog or Pass UFC podcast on YouTube. With minor adjustments, it can be adapted to analyze any other UFC-related podcast by modifying the prompt in the Gemini AI settings. The script utilizes the YouTube API and Gemini AI to process content, and it automatically sets up an SQLite database (ufc_analyzer.db) to store results.
 Project Overview
