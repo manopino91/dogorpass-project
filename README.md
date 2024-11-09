@@ -4,12 +4,10 @@
 
 The **UFC Podcast Analyzer** is a specialized Python script designed to analyze UFC podcasts, specifically the **"Dog or Pass UFC podcast"** on YouTube.
 
-This project analyzes a YouTube podcast transcript, prompts AI Gemini to extract the winning picks,saves them in a database and enables statistical analysis
-
+This project analyzes a YouTube podcast transcript, prompts AI Gemini to extract the winning picks and the event UFC name and saves them in a database, enabling statistical analysis
 of the winning percentage once matched with historical UFC data.
 
 With minor adjustments, it can be easily adapted to analyze other UFC-related podcasts by modifying the prompt in the **Gemini AI** settings. The script leverages
-
 the **YouTube API** and **Gemini AI** to process content, and it automatically sets up an **SQLite database** (`ufc_analyzer.db`) to store the results for easy access and analysis.
 
 ### Key Features:
